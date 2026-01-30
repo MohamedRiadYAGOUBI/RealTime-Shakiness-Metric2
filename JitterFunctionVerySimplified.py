@@ -91,4 +91,5 @@ if __name__ == "__main__":
     # Basic usage
     my_video = "shaky_climbing4.mp4"
 
-    compute_jitter_variance_very_simplified    print(f"Jitter Score: {score}")
+    score = compute_jitter_variance_very_simplified(my_video)
+    print(f"Jitter Score: {score}")
