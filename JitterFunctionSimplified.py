@@ -5,10 +5,17 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
+import numpy as np
+import cv2
+from scipy import signal
+import warnings
+
+warnings.filterwarnings('ignore')
+
 
 def compute_jitter_variance(video_path, fps_override=None):
     """
-    Compute Jitter Variance (Temporal) score from video.
+    Compute Jitter Variance (Temporal) score from video, both implicit and explicit.
 
     Parameters:
     -----------
@@ -19,13 +26,9 @@ def compute_jitter_variance(video_path, fps_override=None):
 
     Returns:
     --------
-    float : Jitter Variance score (higher = more jitter)
-    dict : Additional information about the analysis
+    dict : Jitter metrics including implicit, explicit, and min jitter
     """
-
-    # ========================================================================
-    # STEP 1: LOAD VIDEO
-    # ========================================================================
+    # ================= STEP 1: LOAD VIDEO =================
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise ValueError(f"Cannot open video file: {video_path}")
@@ -34,16 +37,14 @@ def compute_jitter_variance(video_path, fps_override=None):
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # Read first N frames (enough for analysis)
     max_frames = 300
     gray_frames = []
 
-    for frame_idx in range(max_frames):
+    for _ in range(max_frames):
         ret, frame = cap.read()
         if not ret:
             break
         gray_frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-
     cap.release()
 
     if len(gray_frames) < 30:
@@ -52,10 +53,7 @@ def compute_jitter_variance(video_path, fps_override=None):
     gray_frames = np.array(gray_frames)
     actual_frames = len(gray_frames)
 
-    # ========================================================================
-    # STEP 2: EXTRACT TEMPORAL SIGNAL
-    # ========================================================================
-    # Use brightness variation at center of frame
+    # ================= STEP 2: EXTRACT TEMPORAL SIGNAL =================
     patch_size = 30
     center_y, center_x = height // 2, width // 2
     y_start = max(0, center_y - patch_size // 2)
@@ -66,96 +64,48 @@ def compute_jitter_variance(video_path, fps_override=None):
     center_patches = gray_frames[:, y_start:y_end, x_start:x_end]
     brightness_signal = np.mean(center_patches, axis=(1, 2))
 
-    # Normalize signal
     brightness_signal = brightness_signal - np.mean(brightness_signal)
     if np.std(brightness_signal) > 0:
         brightness_signal = brightness_signal / np.std(brightness_signal)
 
-    # ========================================================================
-    # STEP 3: EXTRACT JITTER COMPONENT
-    # ========================================================================
-    # Jitter is the high-frequency component of motion
-    # Use high-pass filter to isolate jitter (> 2Hz)
+    # ================= STEP 3: IMPLICIT JITTER (High-pass filter) =================
     cutoff_freq = 2.0  # Hz
     nyquist = fps / 2
 
     if cutoff_freq < nyquist:
-        # Design high-pass Butterworth filter
-        b, a = signal.butter(
-            N=4,
-            Wn=cutoff_freq / nyquist,
-            btype='high'
-        )
-
-        # Apply zero-phase filtering
-        jitter_signal = signal.filtfilt(b, a, brightness_signal)
+        b, a = signal.butter(N=4, Wn=cutoff_freq / nyquist, btype='high')
+        jitter_implicit = signal.filtfilt(b, a, brightness_signal)
     else:
-        # If cutoff is too high, use simple differentiation
-        jitter_signal = np.diff(brightness_signal, n=2)
-        jitter_signal = np.pad(jitter_signal, (1, 1), 'edge')  # Pad to original length
+        jitter_implicit = np.diff(brightness_signal, n=2)
+        jitter_implicit = np.pad(jitter_implicit, (1, 1), 'edge')
 
-    # ========================================================================
-    # STEP 4: COMPUTE JITTER VARIANCE
-    # ========================================================================
-    jitter_variance = np.var(jitter_signal)
+    # ================= STEP 3B: EXPLICIT JITTER (FFT high-frequency) =================
+    B = np.fft.fft(brightness_signal)
+    freq = np.fft.fftfreq(len(B), d=1 / fps)
+    high_freq_mask = np.abs(freq) > cutoff_freq  # only high frequencies
+    B_high = B * high_freq_mask
+    jitter_explicit = np.fft.ifft(B_high).real  # back to time domain
 
-    # ========================================================================
-    # STEP 5: COMPUTE ADDITIONAL METRICS FOR CONTEXT
-    # ========================================================================
-    # 1. Jitter magnitude (RMS)
-    jitter_rms = np.sqrt(np.mean(jitter_signal ** 2))
-
-    # 2. Peak-to-peak jitter
-    jitter_peak_to_peak = np.max(jitter_signal) - np.min(jitter_signal)
-
-    # 3. Jitter frequency content (dominant frequency)
-    if len(jitter_signal) > 10:
-        fft_jitter = np.fft.fft(jitter_signal)
-        freq = np.fft.fftfreq(len(jitter_signal), 1 / fps)
-
-        # Focus on positive frequencies
-        pos_mask = freq > 0
-        pos_freq = freq[pos_mask]
-        magnitudes = np.abs(fft_jitter[pos_mask])
-
-        if len(magnitudes) > 0:
-            dominant_freq_idx = np.argmax(magnitudes)
-            dominant_freq = pos_freq[dominant_freq_idx]
-        else:
-            dominant_freq = 0
-    else:
-        dominant_freq = 0
-
-    # 4. Signal-to-jitter ratio
-    signal_power = np.mean(brightness_signal ** 2)
-    jitter_power = np.mean(jitter_signal ** 2)
-    sjr = 10 * np.log10(signal_power / (jitter_power + 1e-10)) if jitter_power > 0 else 100
-
-    # ========================================================================
-    # STEP 6: RETURN RESULTS
-    # ========================================================================
-    info = {
-        'jitter_variance': float(jitter_variance),
-        'jitter_rms': float(jitter_rms),
-        'jitter_peak_to_peak': float(jitter_peak_to_peak),
-        'dominant_jitter_frequency': float(dominant_freq),
-        'signal_to_jitter_ratio_db': float(sjr),
-        'video_info': {
-            'path': video_path,
-            'fps': float(fps),
-            'frames_analyzed': int(actual_frames),
-            'duration': float(actual_frames / fps),
-            'resolution': (int(width), int(height))
-        },
-        'processing_info': {
-            'cutoff_frequency_hz': float(cutoff_freq),
-            'signal_length': int(len(brightness_signal))
-        }
+    # ================= STEP 4: COMPUTE METRICS =================
+    jitter_metrics = {
+        'implicit_jitter_variance': float(np.var(jitter_implicit)),
+        'explicit_jitter_variance': float(np.var(jitter_explicit)),
+        'jitter_min': float(np.min(jitter_implicit)),  # minimum of implicit jitter
+        'jitter_max': float(np.max(jitter_implicit)),  # max for reference
+        'jitter_rms': float(np.sqrt(np.mean(jitter_implicit ** 2))),
+        'jitter_peak_to_peak': float(np.max(jitter_implicit) - np.min(jitter_implicit))
     }
 
-    return jitter_variance, info
+    # Add video info
+    jitter_metrics['video_info'] = {
+        'path': video_path,
+        'fps': float(fps),
+        'frames_analyzed': int(actual_frames),
+        'duration': float(actual_frames / fps),
+        'resolution': (int(width), int(height))
+    }
 
-
+    return jitter_metrics
 # ============================================================================
 # SIMPLE VISUALIZATION FUNCTION (Optional)
 # ============================================================================
@@ -166,7 +116,7 @@ def visualize_jitter_analysis(video_path, save_plot=False):
     import matplotlib.pyplot as plt
 
     # Compute jitter variance
-    jitter_score, info = compute_jitter_variance(video_path)
+    jitter_score = compute_jitter_variance(video_path)
 
     # Create simple visualization
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
@@ -283,8 +233,10 @@ def visualize_jitter_analysis(video_path, save_plot=False):
 
 if __name__ == "__main__":
     # Basic usage
-    score, info = compute_jitter_variance("shaky_climbing1.mp4")
+    my_video = "shaky_climbing4.mp4"
+
+    score = compute_jitter_variance(my_video)
     print(f"Jitter Score: {score}")
 
     # With visualization
-    #visualize_jitter_analysis("my_video.mp4", save_plot=True)
+    visualize_jitter_analysis(my_video, save_plot=True)
