@@ -13,7 +13,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
-def compute_jitter_variance(video_path, fps_override=None):
+def compute_jitter_variance_very_simplified(video_path, fps_override=None):
     """
     """
     # ================= STEP 1: LOAD VIDEO =================
@@ -91,5 +91,4 @@ if __name__ == "__main__":
     # Basic usage
     my_video = "shaky_climbing4.mp4"
 
-    score = compute_jitter_variance(my_video)
-    print(f"Jitter Score: {score}")
+    compute_jitter_variance_very_simplified    print(f"Jitter Score: {score}")
